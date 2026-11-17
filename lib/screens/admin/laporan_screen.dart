@@ -1,8 +1,9 @@
-
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/app_theme.dart';
+import '../../core/laporan_pdf.dart';
+import '../../core/skor_kualitas.dart';
 
 class _Aspek {
   const _Aspek({
@@ -32,8 +33,10 @@ class _LaporanData {
     required this.totalKasus,
     required this.berhasil,
     required this.gagal,
+    required this.evaluasi,
   });
 
+  final HasilEvaluasi evaluasi;
   final List<_Aspek> aspek;
   final int jumlahResponden;
   final double rataKeseluruhan;
@@ -67,6 +70,7 @@ class LaporanScreen extends StatefulWidget {
 
 class _LaporanScreenState extends State<LaporanScreen> {
   late Future<_LaporanData> _laporanFuture;
+  _LaporanData? _terakhir;
 
   SupabaseClient get _client => Supabase.instance.client;
 
@@ -113,6 +117,16 @@ class _LaporanScreenState extends State<LaporanScreen> {
           (p['karakteristik'] ?? 'Lainnya').toString();
     }
 
+    // Data mentah per karakteristik untuk skor gabungan.
+    // Kunci disamakan (huruf kecil, tanpa spasi tepi) agar kuesioner
+    // dan black box tetap tergabung walau penulisannya sedikit beda.
+    final mentah = <String, DataKarakteristik>{};
+    DataKarakteristik ambilMentah(String nama) =>
+        mentah.putIfAbsent(
+          nama.trim().toLowerCase(),
+              () => DataKarakteristik(nama.trim()),
+        );
+
     final jumlahNilai = <String, int>{};
     final totalNilai = <String, int>{};
     var seluruhNilai = 0;
@@ -131,6 +145,7 @@ class _LaporanScreenState extends State<LaporanScreen> {
       totalNilai[karakteristik] =
           (totalNilai[karakteristik] ?? 0) + nilai;
 
+      ambilMentah(karakteristik).tambahJawaban(nilai);
       seluruhNilai += nilai;
       jumlahSeluruhJawaban++;
     }
@@ -188,6 +203,16 @@ class _LaporanScreenState extends State<LaporanScreen> {
         .map((k) => k['id'] as int)
         .toSet();
 
+    final karakteristikKasus = <int, String>{
+      for (final k in kasus)
+        k['id'] as int: (k['karakteristik'] ?? 'Lainnya').toString(),
+    };
+
+    // Pastikan karakteristik yang baru punya kasus uji tetap muncul.
+    for (final nama in karakteristikKasus.values) {
+      ambilMentah(nama);
+    }
+
     var berhasil = 0;
     var gagal = 0;
 
@@ -195,6 +220,8 @@ class _LaporanScreenState extends State<LaporanScreen> {
       if (!idKasusValid.contains(h['kasus_id'])) continue;
 
       final status = (h['status'] ?? '').toString().toLowerCase();
+      ambilMentah(karakteristikKasus[h['kasus_id']] ?? 'Lainnya')
+          .tambahHasil(status);
       if (status == 'berhasil') {
         berhasil++;
       } else if (status == 'gagal') {
@@ -202,7 +229,7 @@ class _LaporanScreenState extends State<LaporanScreen> {
       }
     }
 
-    return _LaporanData(
+    final hasilAkhir = _LaporanData(
       aspek: aspek,
       jumlahResponden: respons.length,
       rataKeseluruhan: jumlahSeluruhJawaban == 0
@@ -212,7 +239,36 @@ class _LaporanScreenState extends State<LaporanScreen> {
       totalKasus: kasus.length,
       berhasil: berhasil,
       gagal: gagal,
+      evaluasi: hitungEvaluasi(mentah.values),
     );
+    _terakhir = hasilAkhir;
+    return hasilAkhir;
+  }
+
+  Future<void> _cetakPdf() async {
+    final d = _terakhir;
+    if (d == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Laporan belum selesai dimuat')),
+      );
+      return;
+    }
+    try {
+      final bytes = await buatLaporanPdf(
+        evaluasi: d.evaluasi,
+        responden: d.jumlahResponden,
+        totalKasus: d.totalKasus,
+        berhasil: d.berhasil,
+        gagal: d.gagal,
+        komentar: d.komentar.map((k) => k.isi).toList(),
+      );
+      await tampilkanLaporanPdf(bytes);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Gagal membuat PDF: $e')),
+      );
+    }
   }
 
   @override
@@ -277,6 +333,11 @@ class _LaporanScreenState extends State<LaporanScreen> {
         scrolledUnderElevation: 0,
         actions: [
           IconButton(
+            onPressed: _cetakPdf,
+            tooltip: 'Ekspor PDF',
+            icon: const Icon(Icons.picture_as_pdf_rounded),
+          ),
+          IconButton(
             onPressed: _muatUlang,
             tooltip: 'Muat ulang laporan',
             icon: const Icon(Icons.refresh_rounded),
@@ -334,13 +395,6 @@ class _LaporanScreenState extends State<LaporanScreen> {
           final data = snapshot.data!;
           final aspek = data.aspek;
           final rata = data.rataKeseluruhan;
-
-          _Aspek? terendah;
-          if (aspek.isNotEmpty) {
-            terendah = aspek.reduce(
-                  (a, b) => a.rata <= b.rata ? a : b,
-            );
-          }
 
           return RefreshIndicator(
             onRefresh: _muatUlang,
@@ -571,42 +625,7 @@ class _LaporanScreenState extends State<LaporanScreen> {
                     ],
                   ),
                 ),
-                judul('Rekomendasi evaluasi'),
-                Container(
-                  padding: const EdgeInsets.all(15),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFD97706)
-                        .withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Icon(
-                        Icons.tips_and_updates_rounded,
-                        color: Color(0xFFD97706),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          terendah == null
-                              ? 'Belum tersedia rekomendasi berbasis skor. '
-                              'Kumpulkan jawaban kuesioner terlebih dahulu.'
-                              : 'Prioritas evaluasi: ${terendah.nama} '
-                              'dengan skor ${terendah.rata.toStringAsFixed(2)}/5 '
-                              '(${_predikat(terendah.rata)}). '
-                              'Tinjau pertanyaan dan fitur terkait, '
-                              'lalu lakukan perbaikan berdasarkan '
-                              'temuan pengujian.',
-                          style: const TextStyle(
-                            fontSize: 13.5,
-                            height: 1.5,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                ..._bagianEvaluasi(data.evaluasi, cardColor, judul),
                 judul('Komentar terbaru'),
                 if (data.komentar.isEmpty)
                   _pesanKosong(
@@ -648,6 +667,160 @@ class _LaporanScreenState extends State<LaporanScreen> {
         },
       ),
     );
+  }
+
+  Color _warnaSkor(double? skor) {
+    if (skor == null) return AppColors.muted;
+    if (skor > 80) return const Color(0xFF16A34A);
+    if (skor > 60) return AppColors.teal;
+    if (skor > 40) return const Color(0xFFD97706);
+    return const Color(0xFFDC2626);
+  }
+
+  String _persen(double? v) =>
+      v == null ? '-' : '${v.toStringAsFixed(1)}%';
+
+  /// Skor gabungan kuesioner + black box, lengkap dengan rekomendasi.
+  List<Widget> _bagianEvaluasi(
+      HasilEvaluasi e,
+      Color cardColor,
+      Widget Function(String) judul,
+      ) {
+    final warnaTotal = _warnaSkor(e.skorKeseluruhan);
+
+    return [
+      judul('Skor kualitas gabungan'),
+      Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: warnaTotal.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Row(
+          children: [
+            Text(
+              _persen(e.skorKeseluruhan),
+              style: TextStyle(
+                fontSize: 30,
+                fontWeight: FontWeight.w800,
+                color: warnaTotal,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    e.kategoriKeseluruhan,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: warnaTotal,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Kuesioner ${(kBobotKuesioner * 100).round()}% + '
+                        'black box ${(kBobotBlackBox * 100).round()}%',
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      judul('Rekomendasi per karakteristik'),
+      if (e.karakteristik.isEmpty)
+        _pesanKosong(
+          cardColor,
+          'Belum ada data. Isi kuesioner dan jalankan black box testing '
+              'terlebih dahulu.',
+        )
+      else
+        for (final k in e.karakteristik)
+          Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: cardColor,
+              borderRadius: BorderRadius.circular(16),
+              border: Border(
+                left: BorderSide(color: _warnaSkor(k.skorAkhir), width: 4),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        k.nama,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '${_persen(k.skorAkhir)} · ${k.kategori}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: _warnaSkor(k.skorAkhir),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Kuesioner ${_persen(k.skorKuesioner)} '
+                      '(${k.jumlahJawaban} jawaban) · '
+                      'Black box ${_persen(k.skorBlackBox)} '
+                      '(${k.berhasil} berhasil, ${k.gagal} gagal)',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    color: AppColors.muted,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                for (final r in k.rekomendasi)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.only(top: 2),
+                          child: Icon(
+                            Icons.tips_and_updates_rounded,
+                            size: 14,
+                            color: Color(0xFFD97706),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            r,
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              height: 1.45,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+    ];
   }
 
   Widget _pesanKosong(Color warna, String pesan) {

@@ -1,16 +1,19 @@
 import 'package:flutter/material.dart';
 
 import '../../core/app_theme.dart';
+import '../../models/jadwal.dart';
+import '../../services/jadwal_service.dart';
 
 // ---------------------------------------------------------------------------
-// Data & helper
+// Data pilihan & helper
 // ---------------------------------------------------------------------------
 
 const _hari = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 
-const _kelasList = ['X IPA 1', 'X IPA 2', 'XI IPS 1', 'XI IPS 2', 'XII IPA 1'];
+const _kelasBawaan = ['X IPA 1', 'X IPA 2', 'XI IPS 1', 'XI IPS 2', 'XII IPA 1'];
 
-/// Mata pelajaran beserta pengajar bawaannya.
+/// Mata pelajaran beserta pengajar bawaannya (dipakai kalau belum ada
+/// pengajar terdaftar di tabel profiles).
 const _guruMapel = {
   'Matematika': 'Bu Rina',
   'Bahasa Indonesia': 'Pak Dedi',
@@ -44,65 +47,6 @@ TimeOfDay _parseJam(String jam) {
   );
 }
 
-class _Sesi {
-  _Sesi({
-    required this.id,
-    required this.hari,
-    required this.jam,
-    required this.mapel,
-    required this.kelas,
-    required this.guru,
-    required this.ruang,
-  });
-
-  final int id;
-  String hari;
-  String jam; // format "07.00"
-  String mapel;
-  String kelas;
-  String guru;
-  String ruang;
-}
-
-List<_Sesi> _contoh() {
-  var n = 0;
-  _Sesi s(
-      String hari,
-      String jam,
-      String mapel,
-      String kelas,
-      String guru,
-      String ruang,
-      ) {
-    n++;
-    return _Sesi(
-      id: n,
-      hari: hari,
-      jam: jam,
-      mapel: mapel,
-      kelas: kelas,
-      guru: guru,
-      ruang: ruang,
-    );
-  }
-
-  return [
-    s('Senin', '07.00', 'Matematika', 'X IPA 1', 'Bu Rina', 'R. 101'),
-    s('Senin', '07.00', 'Bahasa Indonesia', 'X IPA 2', 'Pak Dedi', 'R. 102'),
-    s('Senin', '08.30', 'Matematika', 'X IPA 2', 'Bu Rina', 'R. 102'),
-    s('Senin', '08.30', 'Fisika', 'X IPA 1', 'Pak Andi', 'Lab Fisika'),
-    s('Senin', '10.15', 'Matematika', 'XI IPS 1', 'Bu Rina', 'R. 201'),
-    s('Selasa', '07.00', 'Bahasa Inggris', 'X IPA 1', 'Bu Maya', 'R. 101'),
-    s('Selasa', '08.30', 'Kimia', 'X IPA 1', 'Pak Hadi', 'Lab Kimia'),
-    s('Selasa', '10.15', 'Sejarah', 'XI IPS 1', 'Bu Lina', 'R. 201'),
-    s('Rabu', '07.00', 'Biologi', 'X IPA 2', 'Bu Wati', 'Lab Biologi'),
-    s('Rabu', '08.30', 'Informatika', 'XII IPA 1', 'Pak Rudi', 'Lab Komputer'),
-    s('Kamis', '07.00', 'Fisika', 'X IPA 2', 'Pak Andi', 'Lab Fisika'),
-    s('Kamis', '08.30', 'Bahasa Inggris', 'XI IPS 2', 'Bu Maya', 'R. 202'),
-    s('Jumat', '07.00', 'Bahasa Indonesia', 'X IPA 1', 'Pak Dedi', 'R. 101'),
-  ];
-}
-
 // ---------------------------------------------------------------------------
 // Layar jadwal
 // ---------------------------------------------------------------------------
@@ -115,14 +59,62 @@ class JadwalAdminScreen extends StatefulWidget {
 }
 
 class _JadwalAdminScreenState extends State<JadwalAdminScreen> {
-  int _nextId = 100;
+  final _service = JadwalService();
+
   String _filterKelas = 'Semua';
-  final List<_Sesi> _data = _contoh();
+  List<Jadwal> _data = [];
+  List<String> _guruList = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _muat();
+  }
+
+  /// Pilihan kelas = kelas bawaan + kelas yang sudah ada di jadwal.
+  List<String> get _kelasList {
+    final semua = <String>{..._kelasBawaan, ..._data.map((j) => j.kelas)};
+    return semua.toList();
+  }
+
+  /// Pilihan pengajar: dari tabel profiles, atau daftar bawaan kalau kosong.
+  List<String> get _pilihanGuru {
+    if (_guruList.isNotEmpty) return _guruList;
+    return _guruMapel.values.toSet().toList();
+  }
+
+  Future<void> _muat({bool diam = false}) async {
+    if (!diam) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    try {
+      final jadwal = await _service.ambilSemua();
+      final guru = await _service.daftarPengajar();
+      if (!mounted) return;
+      setState(() {
+        _data = jadwal;
+        _guruList = guru;
+        _loading = false;
+        _error = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = JadwalService.friendlyError(e);
+      });
+    }
+  }
 
   /// Mengembalikan alasan bentrok, atau null kalau aman.
-  String? _cekBentrok(_Sesi baru) {
+  String? _cekBentrok(Jadwal baru) {
     for (final s in _data) {
-      if (s.id == baru.id) continue;
+      if (baru.id != null && s.id == baru.id) continue;
       if (s.hari != baru.hari || s.jam != baru.jam) continue;
 
       if (s.kelas == baru.kelas) {
@@ -144,15 +136,16 @@ class _JadwalAdminScreenState extends State<JadwalAdminScreen> {
       ..showSnackBar(SnackBar(content: Text(teks), action: aksi));
   }
 
-  Future<_Sesi?> _bukaForm({_Sesi? awal, required String hari}) {
-    return showModalBottomSheet<_Sesi>(
+  Future<Jadwal?> _bukaForm({Jadwal? awal, required String hari}) {
+    return showModalBottomSheet<Jadwal>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       builder: (_) => _FormSesi(
         awal: awal,
         hariAwal: hari,
-        idBaru: _nextId,
+        kelasList: _kelasList,
+        guruList: _pilihanGuru,
         cekBentrok: _cekBentrok,
       ),
     );
@@ -161,42 +154,64 @@ class _JadwalAdminScreenState extends State<JadwalAdminScreen> {
   Future<void> _tambah(String hari) async {
     final sesi = await _bukaForm(hari: hari);
     if (sesi == null || !mounted) return;
-    setState(() {
-      _nextId++;
-      _data.add(sesi);
-    });
-    _toast('${sesi.mapel} ${sesi.kelas} ditambahkan ke hari ${sesi.hari}');
+    try {
+      await _service.tambah(sesi);
+      await _muat(diam: true);
+      _toast('${sesi.mapel} ${sesi.kelas} ditambahkan ke hari ${sesi.hari}');
+    } catch (e) {
+      if (!mounted) return;
+      _toast(JadwalService.friendlyError(e));
+    }
   }
 
-  Future<void> _ubah(_Sesi s) async {
+  Future<void> _ubah(Jadwal s) async {
     final hasil = await _bukaForm(awal: s, hari: s.hari);
-    if (hasil == null || !mounted) return;
-    setState(() {
-      s.hari = hasil.hari;
-      s.jam = hasil.jam;
-      s.mapel = hasil.mapel;
-      s.kelas = hasil.kelas;
-      s.guru = hasil.guru;
-      s.ruang = hasil.ruang;
-    });
-    _toast('Jadwal diperbarui');
+    if (hasil == null || !mounted || s.id == null) return;
+    try {
+      await _service.ubah(s.id!, hasil);
+      await _muat(diam: true);
+      _toast('Jadwal diperbarui');
+    } catch (e) {
+      if (!mounted) return;
+      _toast(JadwalService.friendlyError(e));
+    }
   }
 
-  void _hapus(_Sesi s) {
-    setState(() => _data.remove(s));
+  Future<void> _hapus(Jadwal s) async {
+    final id = s.id;
+    if (id == null) return;
+
+    // Hilangkan dari layar dulu (Dismissible wajib langsung hilang).
+    setState(() => _data = _data.where((j) => j.id != id).toList());
+
+    try {
+      await _service.hapus(id);
+    } catch (e) {
+      if (!mounted) return;
+      await _muat(diam: true);
+      _toast(JadwalService.friendlyError(e));
+      return;
+    }
+    if (!mounted) return;
+
     _toast(
       '${s.mapel} ${s.kelas} dihapus',
       aksi: SnackBarAction(
         label: 'Urungkan',
-        onPressed: () {
-          if (!mounted) return;
-          setState(() => _data.add(s));
+        onPressed: () async {
+          try {
+            await _service.tambah(s);
+            await _muat(diam: true);
+          } catch (e) {
+            if (!mounted) return;
+            _toast(JadwalService.friendlyError(e));
+          }
         },
       ),
     );
   }
 
-  List<_Sesi> _untukHari(String hari) {
+  List<Jadwal> _untukHari(String hari) {
     final hasil = _data
         .where(
           (s) =>
@@ -229,47 +244,83 @@ class _JadwalAdminScreenState extends State<JadwalAdminScreen> {
             ],
           ),
         ),
-        floatingActionButton: Builder(
+        floatingActionButton: (_loading || _error != null)
+            ? null
+            : Builder(
           builder: (ctx) => FloatingActionButton.extended(
-            onPressed: () => _tambah(_hari[DefaultTabController.of(ctx).index]),
+            onPressed: () =>
+                _tambah(_hari[DefaultTabController.of(ctx).index]),
             icon: const Icon(Icons.add_rounded),
             label: const Text('Tambah jadwal'),
           ),
         ),
-        body: Column(
-          children: [
-            SizedBox(
-              height: 52,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
-                itemCount: _kelasList.length + 1,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (context, i) {
-                  final k = i == 0 ? 'Semua' : _kelasList[i - 1];
-                  return ChoiceChip(
-                    label: Text(k),
-                    selected: _filterKelas == k,
-                    onSelected: (_) => setState(() => _filterKelas = k),
-                  );
-                },
-              ),
-            ),
-            Expanded(
-              child: TabBarView(
-                children: [
-                  for (final h in _hari)
-                    _DaftarHari(
-                      items: _untukHari(h),
-                      onUbah: _ubah,
-                      onHapus: _hapus,
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
+        body: _buildBody(),
       ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.muted),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _muat,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Coba lagi'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final kelas = _kelasList;
+    return Column(
+      children: [
+        SizedBox(
+          height: 52,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+            itemCount: kelas.length + 1,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (context, i) {
+              final k = i == 0 ? 'Semua' : kelas[i - 1];
+              return ChoiceChip(
+                label: Text(k),
+                selected: _filterKelas == k,
+                onSelected: (_) => setState(() => _filterKelas = k),
+              );
+            },
+          ),
+        ),
+        Expanded(
+          child: TabBarView(
+            children: [
+              for (final h in _hari)
+                _DaftarHari(
+                  items: _untukHari(h),
+                  onUbah: _ubah,
+                  onHapus: _hapus,
+                  onRefresh: () => _muat(diam: true),
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -279,19 +330,30 @@ class _DaftarHari extends StatelessWidget {
     required this.items,
     required this.onUbah,
     required this.onHapus,
+    required this.onRefresh,
   });
 
-  final List<_Sesi> items;
-  final void Function(_Sesi) onUbah;
-  final void Function(_Sesi) onHapus;
+  final List<Jadwal> items;
+  final void Function(Jadwal) onUbah;
+  final void Function(Jadwal) onHapus;
+  final Future<void> Function() onRefresh;
 
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) {
-      return const Center(
-        child: Text(
-          'Belum ada jadwal',
-          style: TextStyle(color: AppColors.muted),
+      return RefreshIndicator(
+        onRefresh: onRefresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 120),
+            Center(
+              child: Text(
+                'Belum ada jadwal',
+                style: TextStyle(color: AppColors.muted),
+              ),
+            ),
+          ],
         ),
       );
     }
@@ -299,105 +361,109 @@ class _DaftarHari extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final cardColor = dark ? const Color(0xFF16231F) : Colors.white;
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
-      children: [
-        const Padding(
-          padding: EdgeInsets.only(bottom: 12),
-          child: Text(
-            'Ketuk untuk ubah, geser ke kiri untuk hapus',
-            style: TextStyle(color: AppColors.muted, fontSize: 12.5),
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(bottom: 12),
+            child: Text(
+              'Ketuk untuk ubah, geser ke kiri untuk hapus',
+              style: TextStyle(color: AppColors.muted, fontSize: 12.5),
+            ),
           ),
-        ),
-        for (final s in items)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: Dismissible(
-              key: ValueKey(s.id),
-              direction: DismissDirection.endToStart,
-              background: Container(
-                alignment: Alignment.centerRight,
-                padding: const EdgeInsets.only(right: 24),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFDC2626),
-                  borderRadius: BorderRadius.circular(18),
+          for (final s in items)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Dismissible(
+                key: ValueKey(s.id),
+                direction: DismissDirection.endToStart,
+                background: Container(
+                  alignment: Alignment.centerRight,
+                  padding: const EdgeInsets.only(right: 24),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDC2626),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: const Icon(
+                    Icons.delete_outline_rounded,
+                    color: Colors.white,
+                  ),
                 ),
-                child: const Icon(
-                  Icons.delete_outline_rounded,
-                  color: Colors.white,
-                ),
-              ),
-              onDismissed: (_) => onHapus(s),
-              child: Material(
-                color: cardColor,
-                borderRadius: BorderRadius.circular(18),
-                child: InkWell(
+                onDismissed: (_) => onHapus(s),
+                child: Material(
+                  color: cardColor,
                   borderRadius: BorderRadius.circular(18),
-                  onTap: () => onUbah(s),
-                  child: Padding(
-                    padding: const EdgeInsets.all(14),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 62,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          decoration: BoxDecoration(
-                            color: AppColors.teal,
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Text(
-                            s.jam,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w700,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(18),
+                    onTap: () => onUbah(s),
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 62,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            decoration: BoxDecoration(
+                              color: AppColors.teal,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Text(
+                              s.jam,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                s.mapel,
-                                style: const TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  s.mapel,
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                'Kelas ${s.kelas}  •  ${s.guru}',
-                                style: const TextStyle(
-                                  color: AppColors.muted,
-                                  fontSize: 12.5,
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Kelas ${s.kelas}  •  ${s.guru}',
+                                  style: const TextStyle(
+                                    color: AppColors.muted,
+                                    fontSize: 12.5,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                s.ruang,
-                                style: const TextStyle(
-                                  color: AppColors.muted,
-                                  fontSize: 12.5,
+                                const SizedBox(height: 2),
+                                Text(
+                                  s.ruang,
+                                  style: const TextStyle(
+                                    color: AppColors.muted,
+                                    fontSize: 12.5,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                        const Icon(
-                          Icons.edit_outlined,
-                          size: 20,
-                          color: AppColors.muted,
-                        ),
-                      ],
+                          const Icon(
+                            Icons.edit_outlined,
+                            size: 20,
+                            color: AppColors.muted,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -410,14 +476,16 @@ class _FormSesi extends StatefulWidget {
   const _FormSesi({
     required this.awal,
     required this.hariAwal,
-    required this.idBaru,
+    required this.kelasList,
+    required this.guruList,
     required this.cekBentrok,
   });
 
-  final _Sesi? awal;
+  final Jadwal? awal;
   final String hariAwal;
-  final int idBaru;
-  final String? Function(_Sesi) cekBentrok;
+  final List<String> kelasList;
+  final List<String> guruList;
+  final String? Function(Jadwal) cekBentrok;
 
   @override
   State<_FormSesi> createState() => _FormSesiState();
@@ -430,16 +498,28 @@ class _FormSesiState extends State<_FormSesi> {
   late String _guru;
   late String _ruang;
   late TimeOfDay _jam;
+  late List<String> _guruPilihan;
+  late List<String> _mapelPilihan;
   String? _error;
 
   @override
   void initState() {
     super.initState();
     final a = widget.awal;
+
+    // Pastikan nilai lama tetap muncul sebagai pilihan saat mengubah jadwal.
+    _guruPilihan = [...widget.guruList];
+    if (a != null && !_guruPilihan.contains(a.guru)) _guruPilihan.add(a.guru);
+    _mapelPilihan = _guruMapel.keys.toList();
+    if (a != null && !_mapelPilihan.contains(a.mapel)) _mapelPilihan.add(a.mapel);
+
     _hariPilih = a?.hari ?? widget.hariAwal;
-    _kelas = a?.kelas ?? _kelasList.first;
-    _mapel = a?.mapel ?? _guruMapel.keys.first;
-    _guru = a?.guru ?? (_guruMapel[_mapel] ?? _guruMapel.values.first);
+    _kelas = a?.kelas ?? widget.kelasList.first;
+    _mapel = a?.mapel ?? _mapelPilihan.first;
+    _guru = a?.guru ??
+        (_guruPilihan.contains(_guruMapel[_mapel])
+            ? _guruMapel[_mapel]!
+            : _guruPilihan.first);
     _ruang = a?.ruang ?? _ruangList.first;
     _jam = a == null ? const TimeOfDay(hour: 7, minute: 0) : _parseJam(a.jam);
   }
@@ -454,8 +534,8 @@ class _FormSesiState extends State<_FormSesi> {
   }
 
   void _simpan() {
-    final sesi = _Sesi(
-      id: widget.awal?.id ?? widget.idBaru,
+    final sesi = Jadwal(
+      id: widget.awal?.id,
       hari: _hariPilih,
       jam: _formatJam(_jam),
       mapel: _mapel,
@@ -533,22 +613,25 @@ class _FormSesiState extends State<_FormSesi> {
             ),
             _judul('Kelas'),
             _pilihan(
-              daftar: _kelasList,
+              daftar: widget.kelasList,
               terpilih: _kelas,
               onPilih: (v) => _kelas = v,
             ),
             _judul('Mata pelajaran'),
             _pilihan(
-              daftar: _guruMapel.keys.toList(),
+              daftar: _mapelPilihan,
               terpilih: _mapel,
               onPilih: (v) {
                 _mapel = v;
-                _guru = _guruMapel[v] ?? _guru;
+                final bawaan = _guruMapel[v];
+                if (bawaan != null && _guruPilihan.contains(bawaan)) {
+                  _guru = bawaan;
+                }
               },
             ),
             _judul('Pengajar'),
             _pilihan(
-              daftar: _guruMapel.values.toList(),
+              daftar: _guruPilihan,
               terpilih: _guru,
               onPilih: (v) => _guru = v,
             ),
